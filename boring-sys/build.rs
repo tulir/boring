@@ -33,22 +33,64 @@ const CMAKE_PARAMS_ANDROID_NDK: &[(&str, &[(&str, &str)])] = &[
     ("x86_64", &[("ANDROID_ABI", "x86_64")]),
 ];
 
+fn cmake_params_android() -> &'static [(&'static str, &'static str)] {
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    let cmake_params_android = if cfg!(feature = "ndk-old-gcc") {
+        CMAKE_PARAMS_ANDROID_NDK_OLD_GCC
+    } else {
+        CMAKE_PARAMS_ANDROID_NDK
+    };
+    for (android_arch, params) in cmake_params_android {
+        if *android_arch == arch {
+            return *params;
+        }
+    }
+    &[]
+}
+
 const CMAKE_PARAMS_IOS: &[(&str, &[(&str, &str)])] = &[
     (
-        "aarch64",
+        "aarch64-apple-ios",
         &[
             ("CMAKE_OSX_ARCHITECTURES", "arm64"),
             ("CMAKE_OSX_SYSROOT", "iphoneos"),
         ],
     ),
     (
-        "x86_64",
+        "aarch64-apple-ios-sim",
+        &[
+            ("CMAKE_OSX_ARCHITECTURES", "arm64"),
+            ("CMAKE_OSX_SYSROOT", "iphonesimulator"),
+        ],
+    ),
+    (
+        "x86_64-apple-ios",
         &[
             ("CMAKE_OSX_ARCHITECTURES", "x86_64"),
             ("CMAKE_OSX_SYSROOT", "iphonesimulator"),
         ],
     ),
 ];
+
+fn cmake_params_ios() -> &'static [(&'static str, &'static str)] {
+    let target = std::env::var("TARGET").unwrap();
+    for (ios_target, params) in CMAKE_PARAMS_IOS {
+        if *ios_target == target {
+            return *params;
+        }
+    }
+    &[]
+}
+
+fn get_ios_sdk_name() -> &'static str {
+    for (name, value) in cmake_params_ios() {
+        if *name == "CMAKE_OSX_SYSROOT" {
+            return *value;
+        }
+    }
+    let target = std::env::var("TARGET").unwrap();
+    panic!("cannot find iOS SDK for {} in CMAKE_PARAMS_IOS", target);
+}
 
 /// Returns the platform-specific output path for lib.
 ///
@@ -106,24 +148,14 @@ fn get_boringssl_cmake_config() -> cmake::Config {
     // Add platform-specific parameters.
     match os.as_ref() {
         "android" => {
-            let cmake_params_android = if cfg!(feature = "ndk-old-gcc") {
-                CMAKE_PARAMS_ANDROID_NDK_OLD_GCC
-            } else {
-                CMAKE_PARAMS_ANDROID_NDK
-            };
-
             // We need ANDROID_NDK_HOME to be set properly.
             println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
             let android_ndk_home = std::env::var("ANDROID_NDK_HOME")
                 .expect("Please set ANDROID_NDK_HOME for Android build");
             let android_ndk_home = std::path::Path::new(&android_ndk_home);
-            for (android_arch, params) in cmake_params_android {
-                if *android_arch == arch {
-                    for (name, value) in *params {
-                        eprintln!("android arch={} add {}={}", arch, name, value);
-                        boringssl_cmake.define(name, value);
-                    }
-                }
+            for (name, value) in cmake_params_android() {
+                eprintln!("android arch={} add {}={}", arch, name, value);
+                boringssl_cmake.define(name, value);
             }
             let toolchain_file = android_ndk_home.join("build/cmake/android.toolchain.cmake");
             let toolchain_file = toolchain_file.to_str().unwrap();
@@ -138,13 +170,9 @@ fn get_boringssl_cmake_config() -> cmake::Config {
         }
 
         "ios" => {
-            for (ios_arch, params) in CMAKE_PARAMS_IOS {
-                if *ios_arch == arch {
-                    for (name, value) in *params {
-                        eprintln!("ios arch={} add {}={}", arch, name, value);
-                        boringssl_cmake.define(name, value);
-                    }
-                }
+            for (name, value) in cmake_params_ios() {
+                eprintln!("ios arch={} add {}={}", arch, name, value);
+                boringssl_cmake.define(name, value);
             }
 
             // Bitcode is always on.
@@ -227,6 +255,45 @@ fn verify_fips_clang_version() -> (&'static str, &'static str) {
     unreachable!()
 }
 
+fn get_extra_clang_args_for_bindgen() -> Vec<String> {
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+
+    let mut params = Vec::new();
+
+    // Add platform-specific parameters.
+    #[allow(clippy::single_match)]
+    match os.as_ref() {
+        "ios" => {
+            use std::io::Write;
+            // When cross-compiling for iOS, tell bindgen to use iOS sysroot,
+            // and *don't* use system headers of the host macOS.
+            let sdk = get_ios_sdk_name();
+            let output = std::process::Command::new("xcrun")
+                .args(["--show-sdk-path", "--sdk", sdk])
+                .output()
+                .unwrap();
+            if !output.status.success() {
+                if let Some(exit_code) = output.status.code() {
+                    eprintln!("xcrun failed: exit code {}", exit_code);
+                } else {
+                    eprintln!("xcrun failed: killed");
+                }
+                std::io::stderr().write_all(&output.stderr).unwrap();
+                // Uh... let's try anyway, I guess?
+                return params;
+            }
+            let mut sysroot = String::from_utf8(output.stdout).unwrap();
+            // There is typically a newline at the end which confuses clang.
+            sysroot.truncate(sysroot.trim_end().len());
+            params.push("-isysroot".to_string());
+            params.push(sysroot);
+        }
+        _ => {}
+    }
+
+    params
+}
+
 fn main() {
     use std::env;
 
@@ -287,7 +354,8 @@ fn main() {
     println!("cargo:rustc-link-lib=static=ssl");
 
     // MacOS: Allow cdylib to link with undefined symbols
-    if cfg!(target_os = "macos") {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+    if target_os == "macos" {
         println!("cargo:rustc-cdylib-link-arg=-Wl,-undefined,dynamic_lookup");
     }
 
@@ -313,7 +381,24 @@ fn main() {
         .layout_tests(true)
         .prepend_enum_name(true)
         .rustfmt_bindings(true)
+        .clang_args(get_extra_clang_args_for_bindgen())
         .clang_args(&["-I", &include_path]);
+
+    let target = std::env::var("TARGET").unwrap();
+    match target.as_ref() {
+        // bindgen produces alignment tests that cause undefined behavior [1]
+        // when applied to explicitly unaligned types like OSUnalignedU64.
+        //
+        // There is no way to disable these tests for only some types
+        // and it's not nice to suppress warnings for the entire crate,
+        // so let's disable all alignment tests and hope for the best.
+        //
+        // [1]: https://github.com/rust-lang/rust-bindgen/issues/1651
+        "aarch64-apple-ios" | "aarch64-apple-ios-sim" => {
+            builder = builder.layout_tests(false);
+        }
+        _ => {}
+    }
 
     let headers = [
         "aes.h",
