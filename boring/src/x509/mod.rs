@@ -32,8 +32,10 @@ use crate::pkey::{HasPrivate, HasPublic, PKey, PKeyRef, Public};
 use crate::ssl::SslRef;
 use crate::stack::{Stack, StackRef, Stackable};
 use crate::string::OpensslString;
+use crate::x509::crl::X509CRL;
 use crate::{cvt, cvt_n, cvt_p};
 
+pub mod crl;
 pub mod extension;
 pub mod store;
 pub mod verify;
@@ -49,6 +51,36 @@ foreign_type_and_impl_send_sync! {
     pub struct X509StoreContext;
 }
 
+pub struct X509StoreContextBuilder(X509StoreContext);
+
+impl X509StoreContextBuilder {
+    /// Creates a new builder.
+    pub fn new() -> Result<X509StoreContextBuilder, ErrorStack> {
+        unsafe {
+            ffi::init();
+            cvt_p(ffi::X509_STORE_CTX_new())
+                .map(|p| X509StoreContextBuilder(X509StoreContext::from_ptr(p)))
+        }
+    }
+
+    /// Set the untrusted CRLs to use when verifying a certificate
+    ///
+    /// This corresponds to [`X509_STORE_CTX_set0_crls`]
+    ///
+    /// [`X509_CRL_set0_crls`]: https://www.openssl.org/docs/man1.1.1/man3/X509_STORE_CTX_set0_crls
+    pub fn set_crls(&mut self, crls: Stack<X509CRL>) {
+        unsafe {
+            ffi::X509_STORE_CTX_set0_crls(self.0.as_ptr(), crls.as_ptr());
+            mem::forget(crls);
+        }
+    }
+
+    /// Consumes the builder, returning the certificate.
+    pub fn build(self) -> X509StoreContext {
+        self.0
+    }
+}
+
 impl X509StoreContext {
     /// Returns the index which can be used to obtain a reference to the `Ssl` associated with a
     /// context.
@@ -62,10 +94,7 @@ impl X509StoreContext {
     ///
     /// [`X509_STORE_CTX_new`]: https://www.openssl.org/docs/man1.1.0/crypto/X509_STORE_CTX_new.html
     pub fn new() -> Result<X509StoreContext, ErrorStack> {
-        unsafe {
-            ffi::init();
-            cvt_p(ffi::X509_STORE_CTX_new()).map(|p| X509StoreContext::from_ptr(p))
-        }
+        Ok(X509StoreContextBuilder::new()?.build())
     }
 }
 
@@ -789,6 +818,47 @@ impl X509Extension {
             cvt_p(ffi::X509V3_EXT_nconf_nid(conf, context, name, value))
                 .map(|p| X509Extension::from_ptr(p))
         }
+    }
+}
+
+impl X509ExtensionRef {
+    /// Returns whether this extension is critical
+    ///
+    /// This corresponds to [`X509_EXTENSION_get_critical`].
+    ///
+    /// [`X509_EXTENSION_get_critical`]: https://www.openssl.org/docs/man1.1.1/man3/X509_EXTENSION_get_critical
+    pub fn critical(&self) -> bool {
+        unsafe { ffi::X509_EXTENSION_get_critical(self.as_ptr()) != 0 }
+    }
+
+    /// Returns the `Asn1Object` of this `X509Extension`
+    ///
+    /// This can be used to determine the `Nid` of this extension
+    ///
+    /// This corresponds to [`X509_EXTENSION_get_object`].
+    ///
+    /// [`X509_EXTENSION_get_object`]: https://www.openssl.org/docs/man1.1.1/man3/X509_EXTENSION_get_object
+    pub fn object(&self) -> &Asn1ObjectRef {
+        unsafe { Asn1ObjectRef::from_ptr(ffi::X509_EXTENSION_get_object(self.as_ptr())) }
+    }
+
+    /// Returns the `data` of this `X509Extension`
+    ///
+    /// This corresponds to [`X509_EXTENSION_get_data`].
+    ///
+    /// [`X509_EXTENSION_get_data`]: https://www.openssl.org/docs/man1.1.1/man3/X509_EXTENSION_get_data
+    pub fn data(&self) -> &Asn1StringRef {
+        unsafe { Asn1StringRef::from_ptr(ffi::X509_EXTENSION_get_data(self.as_ptr())) }
+    }
+}
+
+impl fmt::Debug for X509ExtensionRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter
+            .debug_struct("X509Extension")
+            .field("critical", &self.critical())
+            .field("object_nid", &self.object().nid().long_name().unwrap_or(""))
+            .finish()
     }
 }
 
