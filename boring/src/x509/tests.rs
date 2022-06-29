@@ -14,9 +14,7 @@ use crate::x509::extension::{
 };
 use crate::x509::store::X509StoreBuilder;
 use crate::x509::verify::X509VerifyFlags;
-use crate::x509::{
-    X509Name, X509Req, X509StoreContext, X509StoreContextBuilder, X509VerifyResult, X509,
-};
+use crate::x509::{X509Name, X509Req, X509StoreContext, X509VerifyResult, X509};
 
 fn pkey() -> PKey<Private> {
     let rsa = Rsa::generate(2048).unwrap();
@@ -475,7 +473,43 @@ fn test_crl_signature() {
 }
 
 #[test]
-fn test_untrusted_crl() {
+fn test_untrusted_valid_crl() {
+    let cert = include_bytes!("../../test/cert.pem");
+    let cert = X509::from_pem(cert).unwrap();
+    let ca = include_bytes!("../../test/root-ca.pem");
+    let ca = X509::from_pem(ca).unwrap();
+    let chain = Stack::new().unwrap();
+
+    let mut store_bldr = X509StoreBuilder::new().unwrap();
+    store_bldr.add_cert(ca).unwrap();
+    store_bldr
+        .param_mut()
+        .set_flags(X509VerifyFlags::CRL_CHECK | X509VerifyFlags::CRL_CHECK_ALL)
+        .unwrap();
+    let store = store_bldr.build();
+
+    // cert is not revoked
+    let crl = include_bytes!("../../test/empty_crl.pem");
+    let crl = X509CRL::from_pem(crl).unwrap();
+    let mut context = X509StoreContext::new().unwrap();
+    assert!(context
+        .init(&store, &cert, &chain, |c| c
+            .verify_cert_with_crls(stack_of(crl)))
+        .unwrap());
+
+    // cert is revoked
+    let crl = include_bytes!("../../test/crl.pem");
+    let crl = X509CRL::from_pem(crl).unwrap();
+    let mut context = X509StoreContext::new().unwrap();
+    assert!(!context
+        .init(&store, &cert, &chain, |c| c
+            .verify_cert_with_crls(stack_of(crl)))
+        .unwrap());
+    assert_eq!(context.error().as_raw(), ffi::X509_V_ERR_CERT_REVOKED);
+}
+
+#[test]
+fn test_untrusted_invalid_crl() {
     let cert = include_bytes!("../../test/cert.pem");
     let cert = X509::from_pem(cert).unwrap();
     let ca = include_bytes!("../../test/root-ca.pem");
@@ -493,22 +527,25 @@ fn test_untrusted_crl() {
     // this CRL was issued by a different CA (not in the trusted store)
     let crl = include_bytes!("../../test/invalid_crl.pem");
     let crl = X509CRL::from_pem(crl).unwrap();
-    let mut context = X509StoreContextBuilder::new().unwrap();
-    context.set_crls(stack_of(crl));
-    let mut context = context.build();
+    let mut context = X509StoreContext::new().unwrap();
     assert!(!context
-        .init(&store, &cert, &chain, |c| c.verify_cert())
+        .init(&store, &cert, &chain, |c| c
+            .verify_cert_with_crls(stack_of(crl)))
         .unwrap());
+    assert_eq!(context.error().as_raw(), ffi::X509_V_ERR_UNABLE_TO_GET_CRL);
 
     // this CRL has an invalid signature
     let crl = include_bytes!("../../test/bad_sig.pem");
     let crl = X509CRL::from_pem(crl).unwrap();
-    let mut context = X509StoreContextBuilder::new().unwrap();
-    context.set_crls(stack_of(crl));
-    let mut context = context.build();
+    let mut context = X509StoreContext::new().unwrap();
     assert!(!context
-        .init(&store, &cert, &chain, |c| c.verify_cert())
+        .init(&store, &cert, &chain, |c| c
+            .verify_cert_with_crls(stack_of(crl)))
         .unwrap());
+    assert_eq!(
+        context.error().as_raw(),
+        ffi::X509_V_ERR_CRL_SIGNATURE_FAILURE
+    );
 }
 
 #[test]
@@ -570,7 +607,6 @@ fn test_debug_crl() {
     let crl = include_bytes!("../../test/crl.pem");
     let crl = X509CRL::from_pem(crl).unwrap();
     let debugged = format!("{:#?}", crl);
-    println!("{}", debugged);
     assert!(debugged.contains(r#"countryName = "AU""#));
     assert!(debugged.contains(r#"stateOrProvinceName = "Some-State""#));
     assert!(debugged.contains(r#"organizationName = "Internet Widgits Pty Ltd""#));

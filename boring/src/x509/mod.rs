@@ -51,36 +51,6 @@ foreign_type_and_impl_send_sync! {
     pub struct X509StoreContext;
 }
 
-pub struct X509StoreContextBuilder(X509StoreContext);
-
-impl X509StoreContextBuilder {
-    /// Creates a new builder.
-    pub fn new() -> Result<X509StoreContextBuilder, ErrorStack> {
-        unsafe {
-            ffi::init();
-            cvt_p(ffi::X509_STORE_CTX_new())
-                .map(|p| X509StoreContextBuilder(X509StoreContext::from_ptr(p)))
-        }
-    }
-
-    /// Set the untrusted CRLs to use when verifying a certificate
-    ///
-    /// This corresponds to [`X509_STORE_CTX_set0_crls`]
-    ///
-    /// [`X509_CRL_set0_crls`]: https://www.openssl.org/docs/man1.1.1/man3/X509_STORE_CTX_set0_crls
-    pub fn set_crls(&mut self, crls: Stack<X509CRL>) {
-        unsafe {
-            ffi::X509_STORE_CTX_set0_crls(self.0.as_ptr(), crls.as_ptr());
-            mem::forget(crls);
-        }
-    }
-
-    /// Consumes the builder, returning the certificate.
-    pub fn build(self) -> X509StoreContext {
-        self.0
-    }
-}
-
 impl X509StoreContext {
     /// Returns the index which can be used to obtain a reference to the `Ssl` associated with a
     /// context.
@@ -94,7 +64,10 @@ impl X509StoreContext {
     ///
     /// [`X509_STORE_CTX_new`]: https://www.openssl.org/docs/man1.1.0/crypto/X509_STORE_CTX_new.html
     pub fn new() -> Result<X509StoreContext, ErrorStack> {
-        Ok(X509StoreContextBuilder::new()?.build())
+        unsafe {
+            ffi::init();
+            cvt_p(ffi::X509_STORE_CTX_new()).map(|p| X509StoreContext::from_ptr(p))
+        }
     }
 }
 
@@ -184,6 +157,28 @@ impl X509StoreContextRef {
     /// [`X509_verify_cert`]:  https://www.openssl.org/docs/man1.0.2/crypto/X509_verify_cert.html
     pub fn verify_cert(&mut self) -> Result<bool, ErrorStack> {
         unsafe { cvt_n(ffi::X509_verify_cert(self.as_ptr())).map(|n| n != 0) }
+    }
+
+    /// Verifies the stored certificate with additional untrusted CRLs
+    ///
+    /// Returns `true` if verification succeeds. The `error` method will return the specific
+    /// validation error if the certificate was not valid.
+    ///
+    /// This will only work inside of a call to `init`.
+    ///
+    /// This corresponds to [`X509_STORE_CTX_set0_crls`] followed by [`X509_verify_cert`].
+    ///
+    /// [`X509_STORE_CTX_set0_crls`]:  https://www.openssl.org/docs/man1.0.2/crypto/X509_STORE_CTX_set0_crls.html
+    /// [`X509_verify_cert`]:  https://www.openssl.org/docs/man1.0.2/crypto/X509_verify_cert.html
+    pub fn verify_cert_with_crls(
+        &mut self,
+        untrusted_crls: Stack<X509CRL>,
+    ) -> Result<bool, ErrorStack> {
+        unsafe {
+            ffi::X509_STORE_CTX_set0_crls(self.as_ptr(), untrusted_crls.as_ptr());
+            mem::forget(untrusted_crls);
+            cvt_n(ffi::X509_verify_cert(self.as_ptr())).map(|n| n != 0)
+        }
     }
 
     /// Set the error code of the context.
