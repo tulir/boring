@@ -27,7 +27,7 @@ include = [
 ]
 
 [build-dependencies]
-bindgen = { version = "0.62", default-features = false, features = ["runtime"] }
+bindgen = { version = "0.62", default-features = false, features = ["static"] }
 cmake = "0.1"
 
 [features]
